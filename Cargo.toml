@@ -1,0 +1,8 @@
+[workspace]
+
+members = [
+   "server",
+   "client",
+   "crypt",
+]
+resolver = "2" # Use this if you want to use the original resolver
