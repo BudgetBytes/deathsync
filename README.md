@@ -1,0 +1,2 @@
+# deathsync
+Rust dropper
