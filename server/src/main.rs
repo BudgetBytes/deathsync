@@ -1,38 +1,80 @@
 use actix_web::{
     get, post,
-    web::{Bytes, Data, Path},
+    web::{Bytes, Data, Json, Path},
     App, HttpRequest, HttpServer, Responder,
 };
-use crypt;
+use crypt::{self, encrypt};
 use hex::{decode, encode};
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::sync::{Arc, Mutex};
 use std::{collections::HashMap, net::IpAddr};
+use x25519_dalek::{EphemeralSecret, PublicKey, SharedSecret};
 
-const PAYLOAD_PATH: &str = "./test/payload.rs";
+const PAYLOAD_PATH: &str = "./test/test";
 
 #[derive(Clone)]
 struct ClientsState {
-    hashmap: Arc<Mutex<HashMap<IpAddr, String>>>,
+    hashmap: Arc<Mutex<HashMap<IpAddr, SharedSecret>>>,
     chunked_payload: Vec<Vec<u8>>,
 }
 
-#[post("/init")]
-async fn init(req: HttpRequest, body: Bytes, data: Data<ClientsState>) -> impl Responder {
-    let mut key_table = data.hashmap.lock().unwrap();
+#[derive(Serialize)]
+struct ExchangeResponse {
+    publickey: String,
+    chunks: usize,
+}
 
+#[post("/exchange")]
+async fn exchange_keys(req: HttpRequest, body: Bytes, data: Data<ClientsState>) -> impl Responder {
+    let mut key_table = data.hashmap.lock().unwrap();
     if let Some(val) = req.peer_addr() {
         let ip = val.ip();
         if !key_table.contains_key(&ip) {
-            let client_pubkey = String::from_utf8(decode(body.to_vec()).unwrap()).unwrap();
-            key_table.insert(ip, client_pubkey);
-            return format!("{}", data.chunked_payload.len());
+            let secret = EphemeralSecret::random();
+            let public = PublicKey::from(&secret);
+
+            let hex_peer_public = body.to_ascii_lowercase();
+            let peer_public: Result<[u8; 32], _> =
+                decode(hex_peer_public).unwrap().as_slice().try_into();
+
+            let peer_public_key = match peer_public {
+                Ok(array) => PublicKey::from(array),
+                Err(_) => {
+                    eprintln!("Invalid public key");
+                    return Json(ExchangeResponse {
+                        publickey: String::from(""),
+                        chunks: 0, 
+                    });
+                }
+            };
+
+            let shared_secret = secret.diffie_hellman(&PublicKey::from(peer_public_key));
+            let hex_public = encode(public.as_bytes());
+            key_table.insert(ip, shared_secret);
+
+            return Json(ExchangeResponse {
+                publickey: hex_public,
+                chunks: data.chunked_payload.len(), 
+            });
         } else {
             eprintln!("Collision detected for IP: {}", ip);
-            return format!("{}", -1);
+            return Json(ExchangeResponse {
+                publickey: String::from(""),
+                chunks: 0, 
+            });
         }
     };
-    return format!("{}", 0);
+    return Json(ExchangeResponse {
+        publickey: String::from(""),
+        chunks: 0, 
+    });
+}
+
+#[derive(Serialize)]
+struct SyncResponse {
+    enc_payload: String,
+    nonce: String
 }
 
 #[get("/death_sync/{id}")]
@@ -44,10 +86,15 @@ async fn death_sync(req: HttpRequest, path: Path<u32>, data: Data<ClientsState>)
         match key_table.get(&ip) {
             Some(value) => {
                 let chunk = data.chunked_payload[id].clone();
-                let pub_key = crypt::pub_decode(value.clone()).expect("failed to decode ");
-                let enc_chunk = crypt::encrypt(&chunk, pub_key).expect("failed to encrypt");
-                let hex_chunk = encode(enc_chunk);
-                return hex_chunk;
+                let key = crypt::str_to_key(value.as_bytes());
+                let nonce = crypt::gen_nonce();
+                let ciphertext = crypt::encrypt(nonce, key, &chunk).unwrap();
+                let enc_payload = encode(ciphertext);
+                let enc_nonce = encode(nonce);
+                return Json(SyncResponse {
+                    enc_payload: enc_payload,
+                    nonce: enc_nonce
+                });
             }
             None => {
                 eprintln!("The ip {} didn't initialized before syncing", ip);
@@ -55,7 +102,10 @@ async fn death_sync(req: HttpRequest, path: Path<u32>, data: Data<ClientsState>)
         }
     };
 
-    return String::from("Error");
+    return Json(SyncResponse {
+        enc_payload: "".to_string(),
+        nonce: "".to_string()
+    });
 }
 
 #[get("/end")]
@@ -66,10 +116,10 @@ async fn end(req: HttpRequest, data: Data<ClientsState>) -> impl Responder {
         let ip = val.ip();
         if !key_table.contains_key(&ip) {
             eprintln!("The ip {} didn't initialized before syncing", ip);
-            return "You need to initialize MF"
+            return "You need to initialize MF";
         } else {
             key_table.remove(&ip);
-            return "Happy Hacking ;)"
+            return "Happy Hacking ;)";
         }
     };
 
@@ -78,8 +128,8 @@ async fn end(req: HttpRequest, data: Data<ClientsState>) -> impl Responder {
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    let content = fs::read(PAYLOAD_PATH)?;
-    let chunk_size = 128;
+    let content: Vec<u8> = fs::read(PAYLOAD_PATH)?;
+    let chunk_size = 64*1024;
     let chunked_payload: Vec<Vec<u8>> = content
         .chunks(chunk_size)
         .map(|chunk| chunk.to_vec())
@@ -92,7 +142,7 @@ async fn main() -> std::io::Result<()> {
     HttpServer::new(move || {
         App::new()
             .app_data(Data::new(client_data.clone()))
-            .service(init)
+            .service(exchange_keys)
             .service(death_sync)
             .service(end)
     })

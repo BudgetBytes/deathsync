@@ -1,52 +1,42 @@
-use rand;
-use rsa::{
-    pkcs1::{
-        DecodeRsaPrivateKey, DecodeRsaPublicKey, EncodeRsaPrivateKey, EncodeRsaPublicKey,
-        LineEnding,
-    },
-    Pkcs1v15Encrypt, RsaPrivateKey, RsaPublicKey,
+use chacha20poly1305::{
+    aead::{Aead, AeadCore, KeyInit, OsRng},
+    XChaCha20Poly1305, XNonce, Key
 };
 use anyhow::Result;
 
-pub fn new(bits: usize) -> Result<(RsaPublicKey, RsaPrivateKey)> {
-    let mut rng = rand::thread_rng();
-    let priv_key = RsaPrivateKey::new(&mut rng, bits)?;
-    let pub_key = RsaPublicKey::from(&priv_key);
-    Ok((pub_key, priv_key))
+pub fn gen_nonce() -> XNonce {
+    let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng); // 192-bits; unique per message
+
+    return nonce;
 }
 
-
-pub fn pub_encode(key: RsaPublicKey) -> Result<String>{
-    let enc_key = EncodeRsaPublicKey::to_pkcs1_pem(&key, LineEnding::LF)?;
-    Ok(enc_key)
+pub fn gen_key() -> Key {
+    let key = XChaCha20Poly1305::generate_key(&mut OsRng);
+    return key;
 }
 
-pub fn priv_encode(key: RsaPrivateKey) -> Result<String> {
-    let enc_key = EncodeRsaPrivateKey::to_pkcs1_pem(&key, LineEnding::LF)?.to_string();
-    Ok(enc_key)
+pub fn str_to_key(key_string: &[u8]) -> Key {
+    let key = Key::from_slice(key_string);
+    return *key
 }
 
-pub fn pub_decode(pem: String) -> Result<RsaPublicKey> {
-    let key = DecodeRsaPublicKey::from_pkcs1_pem(&pem)?;
-    Ok(key)
+pub fn str_to_nonce(key_string: &[u8]) -> XNonce {
+    let nonce = XNonce::from_slice(key_string);
+    return *nonce
 }
 
-pub fn priv_decode(pem: String) -> Result<RsaPrivateKey> {
-    let key: RsaPrivateKey = DecodeRsaPrivateKey::from_pkcs1_pem(&pem)?;
-    Ok(key)
-}
-
-pub fn encrypt(data: &[u8], pub_key: RsaPublicKey) -> Result<Vec<u8>> {
-    let mut rng = rand::thread_rng();
-    let enc_data = pub_key
-        .encrypt(&mut rng, Pkcs1v15Encrypt, &data[..])?;
-    Ok(enc_data)
-}
-
-pub fn decrypt(data: &[u8], priv_key: RsaPrivateKey) -> Result<Vec<u8>> {
-    let dec_data = priv_key
-        .decrypt(Pkcs1v15Encrypt, &data)?;
-    Ok(dec_data)
-}
-
-
+pub fn encrypt(nonce: XNonce, key: Key, plaintext: &[u8]) -> Result<Vec<u8>, chacha20poly1305::Error> {
+    let cipher = XChaCha20Poly1305::new(&key);
+    match cipher.encrypt(&nonce, plaintext) {
+        Ok(ciphertext) => Ok(ciphertext),
+        Err(e) => Err(e),
+    }
+ }
+ 
+ pub fn decrypt(nonce: XNonce, key: Key, ciphertext: &[u8]) -> Result<Vec<u8>, chacha20poly1305::Error> {
+    let cipher = XChaCha20Poly1305::new(&key);
+    match cipher.decrypt(&nonce, ciphertext) {
+        Ok(plaintext) => Ok(plaintext),
+        Err(e) => Err(e),
+    }
+ }
